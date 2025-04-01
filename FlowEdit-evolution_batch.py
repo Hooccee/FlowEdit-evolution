@@ -117,8 +117,8 @@ def main():
     else:
         raise ValueError(f"不支持的模型类型: {args.model_type}")
     
-    # 启用CPU卸载以节省显存
-    pipe.enable_sequential_cpu_offload()
+    
+    pipe.to(device)
     
     # 5. 评估指标初始化 ############################################
     if args.eval_metrics:
