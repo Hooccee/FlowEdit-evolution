@@ -1,0 +1,6 @@
+
+**.txt
+my_results/b**/*.png
+**.log
+outputs/**/*.png
+**/__pycache__/
