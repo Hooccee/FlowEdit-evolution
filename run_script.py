@@ -1,3 +1,5 @@
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = '1'
 import torch
 from diffusers import StableDiffusion3Pipeline
 from diffusers import FluxPipeline
@@ -33,14 +35,15 @@ if __name__ == "__main__":
 
     if model_type == 'FLUX':
         # pipe = FluxPipeline.from_pretrained("black-forest-labs/FLUX.1-schnell", torch_dtype=torch.float16) 
-        pipe = FluxPipeline.from_pretrained("black-forest-labs/FLUX.1-dev", torch_dtype=torch.float16)
+        pipe = FluxPipeline.from_pretrained("/data/chx/FLUX.1-dev", torch_dtype=torch.float16)
     elif model_type == 'SD3':
         pipe = StableDiffusion3Pipeline.from_pretrained("stabilityai/stable-diffusion-3-medium-diffusers", torch_dtype=torch.float16)
     else:
         raise NotImplementedError(f"Model type {model_type} not implemented")
     
     scheduler = pipe.scheduler
-    pipe = pipe.to(device)
+    #pipe = pipe.to(device)
+    pipe.enable_sequential_cpu_offload()
 
     for exp_dict in exp_configs:
 
