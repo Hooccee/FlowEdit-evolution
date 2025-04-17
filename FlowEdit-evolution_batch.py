@@ -1,7 +1,9 @@
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = '2'
+import gc
 import torch
-from diffusers import StableDiffusion3Pipeline, FluxPipeline
+from diffusers import StableDiffusion3Pipeline, FluxPipeline,FluxTransformer2DModel
+from diffusers import BitsAndBytesConfig as DiffusersBitsAndBytesConfig
 from PIL import Image
 import argparse
 import random 
@@ -109,7 +111,25 @@ def main():
 
     # 4. 模型加载 ##################################################
     if args.model_type == 'FLUX':
-        pipe = FluxPipeline.from_pretrained(args.model_path, torch_dtype=torch.float16)
+        # pipe = FluxPipeline.from_pretrained(args.model_path, torch_dtype=torch.float16)
+        # pipe.enable_sequential_cpu_offload()
+
+        quant_config = DiffusersBitsAndBytesConfig(load_in_8bit=True,)
+        transformer_8bit = FluxTransformer2DModel.from_pretrained(
+            args.model_path,
+            subfolder="transformer",
+            quantization_config=quant_config,
+            torch_dtype=torch.bfloat16,
+        )
+        pipe = FluxPipeline.from_pretrained(args.model_path, torch_dtype=torch.bfloat16,transformer=transformer_8bit)
+        print(pipe.hf_device_map)
+        pipe.enable_model_cpu_offload()
+
+
+
+
+
+
     elif args.model_type == 'SD3':
         pipe = StableDiffusion3Pipeline.from_pretrained(
             "stabilityai/stable-diffusion-3-medium-diffusers", 
@@ -118,7 +138,7 @@ def main():
         raise ValueError(f"不支持的模型类型: {args.model_type}")
     
     
-    pipe.to(device)
+    # pipe.to(device)
     
     # 5. 评估指标初始化 ############################################
     if args.eval_metrics:
@@ -132,7 +152,7 @@ def main():
             'dino': 0.0,         # 高级特征相似度
             'count': 0           # 样本计数
         }
-        metric_calculator = metircs()  # 指标计算器
+
 
     # 6. 处理循环 ##################################################
     progress = tqdm(dataloader, desc="Processing")
@@ -157,7 +177,10 @@ def main():
                 width = init_image_pil.width - init_image_pil.width % 16
                 height = init_image_pil.height - init_image_pil.height % 16
                 init_image_pil = init_image_pil.crop((0, 0, width, height))
-                
+#****************************************************************               
+                print("width:", width)
+                print("height:", height)
+#****************************************************************
                 # 预处理图像
                 image_src = pipe.image_processor.preprocess(init_image_pil)
                 image_src = image_src.to(device).half()
@@ -177,7 +200,8 @@ def main():
                         source_prompts[idx], target_prompts[idx], "",
                         args.T_steps, args.n_avg, 
                         args.src_guidance_scale, args.tar_guidance_scale,
-                        args.n_min, args.n_max
+                        args.n_min, args.n_max,
+                        height, width
                     )
                 else:  # FLUX
                     x0_tar = FlowEditFLUX(
@@ -185,7 +209,8 @@ def main():
                         source_prompts[idx], target_prompts[idx], "",
                         args.T_steps, args.n_avg, 
                         args.src_guidance_scale, args.tar_guidance_scale,
-                        args.n_min, args.n_max
+                        args.n_min, args.n_max,
+                        height, width
                     )
                 
                 # 解码回像素空间
@@ -210,6 +235,7 @@ def main():
                     ])(init_image_pil).unsqueeze(0).to(device)
                     
                     # 计算各项指标
+                    metric_calculator = metircs()  # 指标计算器
                     clip_score = metric_calculator.clip_scores(edited_tensor, target_prompts[idx])
                     clip_score_i = metric_calculator.clip_scores(edited_tensor, orig_tensor)
                     mse = metric_calculator.mse_scores(edited_tensor, orig_tensor)
@@ -217,6 +243,9 @@ def main():
                     lpips_val = metric_calculator.lpips_scores(edited_tensor, orig_tensor)
                     ssim_val = metric_calculator.ssim_scores(edited_tensor, orig_tensor)
                     dino_val = metric_calculator.dino_scores(edited_tensor, orig_tensor)
+
+                    del metric_calculator  # 清理指标计算器
+                    gc.collect()
                     
                     # 打印样本指标
                     print(f"\n样本 {batch_idx}-{idx} 指标:")
