@@ -250,7 +250,7 @@ def FlowEditFLUX(pipe,
 
     # 设备设置和图像尺寸获取
 #****************************************************************
-    print(f"FlowEditFLUX: x_src.shape={x_src.shape}, pipe.vae_scale_factor={pipe.vae_scale_factor}")
+    # print(f"FlowEditFLUX: x_src.shape={x_src.shape}, pipe.vae_scale_factor={pipe.vae_scale_factor}")
 #****************************************************************
     device = x_src.device
     num_channels_latents = pipe.transformer.config.in_channels // 4  # 潜在变量通道数
@@ -267,15 +267,15 @@ def FlowEditFLUX(pipe,
 
     # 准备源图像的潜在变量
 #****************************************************************
-    print("\n===== prepare_latents 参数 =====")
-    print(f"batch_size: {x_src.shape[0]}")
-    print(f"num_channels_latents: {num_channels_latents}")
-    print(f"height: {orig_height}")
-    print(f"width: {orig_width}")
-    print(f"dtype: {x_src.dtype}")
-    print(f"device: {device}")
-    print(f"generator: {None}")  # 这里显式传入的是 None
-    print(f"latents: shape={x_src.shape}, dtype={x_src.dtype}, device={x_src.device}")
+    # print("\n===== prepare_latents 参数 =====")
+    # print(f"batch_size: {x_src.shape[0]}")
+    # print(f"num_channels_latents: {num_channels_latents}")
+    # print(f"height: {orig_height}")
+    # print(f"width: {orig_width}")
+    # print(f"dtype: {x_src.dtype}")
+    # print(f"device: {device}")
+    # print(f"generator: {None}")  # 这里显式传入的是 None
+    # print(f"latents: shape={x_src.shape}, dtype={x_src.dtype}, device={x_src.device}")
 #****************************************************************
     x_src, latent_src_image_ids = pipe.prepare_latents(
         batch_size=x_src.shape[0],
@@ -316,6 +316,8 @@ def FlowEditFLUX(pipe,
     num_warmup_steps = max(len(timesteps) - T_steps * pipe.scheduler.order, 0)
     pipe._num_timesteps = len(timesteps)
 
+    pipe.text_encoder.to('cuda')
+    pipe.text_encoder_2.to('cuda')
     # 编码源提示文本
     (
         src_prompt_embeds,        # 源提示的嵌入表示
@@ -361,6 +363,12 @@ def FlowEditFLUX(pipe,
         scheduler._init_step_index(t)
         t_i = scheduler.sigmas[scheduler.step_index]  # 当前时间步的sigma值
         t_im1 = scheduler.sigmas[scheduler.step_index + 1] if i < len(timesteps) else t_i  # 下一时间步sigma值
+        
+        
+        pipe.vae.to('cpu')
+        pipe.text_encoder.to('cpu')
+        pipe.text_encoder_2.to('cpu')
+        torch.cuda.empty_cache() 
 
         # ODE编辑阶段（当剩余步数大于n_min时）
         if T_steps - i > n_min:

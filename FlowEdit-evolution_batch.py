@@ -178,18 +178,18 @@ def main():
                 height = init_image_pil.height - init_image_pil.height % 16
                 init_image_pil = init_image_pil.crop((0, 0, width, height))
 #****************************************************************               
-                print("width:", width)
-                print("height:", height)
+                # print("width:", width)
+                # print("height:", height)
 #****************************************************************
                 # 预处理图像
                 image_src = pipe.image_processor.preprocess(init_image_pil)
-                image_src = image_src.to(device).half()
+                image_src = image_src.to(device).to(torch.bfloat16)
                 
                 # 编码到潜在空间
                 with torch.autocast("cuda"), torch.inference_mode():
                     x0_src_denorm = pipe.vae.encode(image_src).latent_dist.mode()
                 x0_src = (x0_src_denorm - pipe.vae.config.shift_factor) * pipe.vae.config.scaling_factor
-                x0_src = x0_src.to(device)
+                x0_src = x0_src.to(device).to(torch.bfloat16)
                 
                 # 6.2 处理每个目标提示 -----------------------------
 
@@ -282,13 +282,25 @@ def main():
                     os.makedirs(save_dir, exist_ok=True)
                     
                     # 保存编辑后的图像
-                    edited_img.save(os.path.join(save_dir, f"edited_.png"))
+                    edited_path = os.path.join(save_dir, f"edited_.png")
+                    edited_img.save(edited_path)
                     # 保存原始图像
-                    init_image_pil.save(os.path.join(save_dir, "original.png"))
+                    original_path = os.path.join(save_dir, "original.png")
+                    init_image_pil.save(original_path)
                     # 保存提示文本
-                    with open(os.path.join(save_dir, "prompts.txt"), "w") as f:
+                    prompts_path = os.path.join(save_dir, "prompts.txt")
+                    with open(prompts_path, "w") as f:
                         f.write(f"Source: {source_prompts[idx]}\n")
                         f.write(f"Target: {target_prompts[idx]}\n")
+                    
+                    # 添加打印信息
+                    print(f"样本保存完成 [批次{batch_idx}-样本{idx}]")
+                    print(f"保存路径: {save_dir}")
+                    print(f"编辑图像: {os.path.basename(edited_path)}")
+                    print(f"原始图像: {os.path.basename(original_path)}")
+                    print(f"提示文件: {os.path.basename(prompts_path)}")
+                    print(f"源提示: {source_prompts[idx][:50]}...")
+                    print(f"目标提示: {target_prompts[idx][:50]}...")
             
             # except Exception as e:
             #     print(f"处理样本 {batch_idx}-{idx} 时出错: {str(e)}")
