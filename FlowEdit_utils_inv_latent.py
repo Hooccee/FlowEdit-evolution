@@ -248,10 +248,7 @@ def FlowEditFLUX(pipe,
                 orig_width: int = 1024,   # 原始图像宽度
                 ):     
 
-    # 设备设置和图像尺寸获取
-#****************************************************************
-    # print(f"FlowEditFLUX: x_src.shape={x_src.shape}, pipe.vae_scale_factor={pipe.vae_scale_factor}")
-#****************************************************************
+
     device = x_src.device
     num_channels_latents = pipe.transformer.config.in_channels // 4  # 潜在变量通道数
 
@@ -265,18 +262,7 @@ def FlowEditFLUX(pipe,
         max_sequence_length=512,
     )
 
-    # 准备源图像的潜在变量
-#****************************************************************
-    # print("\n===== prepare_latents 参数 =====")
-    # print(f"batch_size: {x_src.shape[0]}")
-    # print(f"num_channels_latents: {num_channels_latents}")
-    # print(f"height: {orig_height}")
-    # print(f"width: {orig_width}")
-    # print(f"dtype: {x_src.dtype}")
-    # print(f"device: {device}")
-    # print(f"generator: {None}")  # 这里显式传入的是 None
-    # print(f"latents: shape={x_src.shape}, dtype={x_src.dtype}, device={x_src.device}")
-#****************************************************************
+
     x_src, latent_src_image_ids = pipe.prepare_latents(
         batch_size=x_src.shape[0],
         num_channels_latents=num_channels_latents,
@@ -358,6 +344,38 @@ def FlowEditFLUX(pipe,
     pipe.text_encoder_2.to('cpu')
     torch.cuda.empty_cache() 
 
+    timesteps_rev=timesteps[::-1]
+    zt_src_inv=x_src_packed
+
+    for i, t in tqdm(enumerate(timesteps_rev)):
+        # 初始化调度器步索引
+        scheduler._init_step_index(t)
+        t_i = scheduler.sigmas[scheduler.step_index]  # 当前时间步的sigma值
+        t_im1 = scheduler.sigmas[scheduler.step_index + 1] if i < len(timesteps) else t_i  # 下一时间步sigma值
+
+        Vt_src_inv = calc_v_flux(
+            pipe,
+            latents=zt_src_inv,
+            prompt_embeds=src_prompt_embeds,
+            pooled_prompt_embeds=src_pooled_prompt_embeds,
+            guidance=src_guidance,
+            text_ids=src_text_ids,
+            latent_image_ids=latent_src_image_ids,
+            t=t
+        )
+
+        # 更新状态
+        prev_sample = zt_src_inv.to(torch.float32) + (t_im1 - t_i) * Vt_src_inv
+        zt_src_inv = prev_sample.to(zt_src_inv.dtype)
+
+
+
+
+
+
+
+
+        
 
     # 主循环：迭代处理每个时间步
     for i, t in tqdm(enumerate(timesteps)):
@@ -381,17 +399,15 @@ def FlowEditFLUX(pipe,
             # 多次计算速度场取平均
             for k in range(n_avg):
                 # 生成前向噪声
-                fwd_noise = torch.randn_like(x_src_packed).to(device)
+                # fwd_noise = torch.randn_like(x_src_packed).to(device)
+                fwd_noise = zt_src_inv
                 
                 # 构造源噪声潜在变量
                 zt_src = (1 - t_i) * x_src_packed + t_i * fwd_noise
                 # 构造目标噪声潜在变量
                 zt_tar = zt_edit + zt_src - x_src_packed       #(zt_edit - t_i*x_src_packed)+ t_i * fwd_noise
 
-                # 计算源提示的速度场
-#****************************************************************
-                # print("latent_image_ids.shape", latent_src_image_ids.shape)
-#****************************************************************
+
                 Vt_src = calc_v_flux(
                     pipe,
                     latents=zt_src,
