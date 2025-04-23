@@ -329,8 +329,8 @@ def FlowEditFLUX(pipe,
 
     # 处理引导参数
     if pipe.transformer.config.guidance_embeds:  # 如果模型支持引导嵌入
-        src_guidance = torch.tensor([src_guidance_scale], device=device).expand(x_src_packed.shape[0])
-        tar_guidance = torch.tensor([tar_guidance_scale], device=device).expand(x_src_packed.shape[0])
+        src_guidance = torch.tensor([1], device=device).expand(x_src_packed.shape[0])
+        tar_guidance = torch.tensor([2.5], device=device).expand(x_src_packed.shape[0])
     else:
         src_guidance = None
         tar_guidance = None
@@ -344,24 +344,31 @@ def FlowEditFLUX(pipe,
     pipe.text_encoder_2.to('cpu')
     torch.cuda.empty_cache() 
 
-    timesteps_rev=timesteps[::-1]
-    zt_src_inv=x_src_packed
 
+    timesteps_rev = torch.flip(timesteps, dims=(0,)) 
+
+    zt_src_inv=x_src_packed
+    src_guidance_inv = torch.tensor([1], device=device).expand(x_src_packed.shape[0])
     for i, t in tqdm(enumerate(timesteps_rev)):
+        print("i:",i)
+        print("t:",t)
         # 初始化调度器步索引
         scheduler._init_step_index(t)
-        t_i = scheduler.sigmas[scheduler.step_index]  # 当前时间步的sigma值
-        t_im1 = scheduler.sigmas[scheduler.step_index + 1] if i < len(timesteps) else t_i  # 下一时间步sigma值
+        t_i = scheduler.sigmas[scheduler.step_index+1] if i >0 else 0 # 当前时间步的sigma值
+        t_im1 = scheduler.sigmas[scheduler.step_index] # 下一时间步sigma值
+        print("t_i:",t_i)
+        print("t_im1:",t_im1)
 
         Vt_src_inv = calc_v_flux(
             pipe,
             latents=zt_src_inv,
             prompt_embeds=src_prompt_embeds,
             pooled_prompt_embeds=src_pooled_prompt_embeds,
-            guidance=src_guidance,
+            guidance=src_guidance_inv,
             text_ids=src_text_ids,
             latent_image_ids=latent_src_image_ids,
-            t=t
+            t=timesteps_rev[i-1] if i >0 else torch.tensor(0, dtype=timesteps_rev[i].dtype, device=timesteps_rev[i].device)
+
         )
 
         # 更新状态

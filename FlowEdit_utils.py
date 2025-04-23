@@ -388,10 +388,7 @@ def FlowEditFLUX(pipe,
                 # 构造目标噪声潜在变量
                 zt_tar = zt_edit + zt_src - x_src_packed       #(zt_edit - t_i*x_src_packed)+ t_i * fwd_noise
 
-                # 计算源提示的速度场
-#****************************************************************
-                # print("latent_image_ids.shape", latent_src_image_ids.shape)
-#****************************************************************
+
                 Vt_src = calc_v_flux(
                     pipe,
                     latents=zt_src,
