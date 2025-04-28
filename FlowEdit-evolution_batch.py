@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 # from FlowEdit_utils import FlowEditSD3, FlowEditFLUX
-from FlowEdit_utils_inv_latent import FlowEditSD3, FlowEditFLUX
+from FlowEdit_utils import FlowEditSD3, FlowEditFLUX
 from datasets import get_dataloader
 from utils.utils import *
 from utils.metrics import *
