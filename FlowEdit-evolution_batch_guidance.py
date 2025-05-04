@@ -211,7 +211,8 @@ def main():
                         args.T_steps, args.n_avg, 
                         args.src_guidance_scale, args.tar_guidance_scale,
                         args.n_min, args.n_max,
-                        height, width
+                        height, width,
+                        init_image_pil,
                     )
                 
                 # 解码回像素空间
