@@ -249,6 +249,7 @@ def main():
                     del metric_calculator  # 清理指标计算器
                     gc.collect()
                     
+                    dino_val=dino_val.item()
                     # 打印样本指标
                     print(f"\n样本 {batch_idx}-{idx} 指标:")
                     print(f"源提示: {source_prompts[idx]}")

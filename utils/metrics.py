@@ -43,7 +43,7 @@ class metircs:  # 输入图像值范围均为[-1,1]
         # 转换为[0,1]范围
         image_01 = (tensor + 1) / 2
         # 调整维度顺序并转换为uint8
-        image_uint8 = (image_01.permute(1, 2, 0) * 255).clamp(0, 255).to(torch.uint8)
+        image_uint8 = (image_01.permute(1, 2, 0) * 255).clamp(0, 255)#.to(torch.uint8)
         # 转换为PIL图像
         return Image.fromarray(image_uint8.cpu().numpy())
 
@@ -66,7 +66,7 @@ class metircs:  # 输入图像值范围均为[-1,1]
         features2 = outputs2.last_hidden_state.mean(dim=1)
         
         # 计算余弦相似度并归一化
-        sim = torch.nn.functional.cosine_similarity(features1, features2, dim=1).item()
+        sim = torch.nn.functional.cosine_similarity(features1, features2, dim=1)#.item()
         return (sim + 1) / 2  # 归一化到[0,1]
     
     def clip_scores(self, image, txt):

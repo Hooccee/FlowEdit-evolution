@@ -1,8 +1,18 @@
 from typing import Optional, Tuple, Union
+import torch.nn as nn
 import torch
+import torch.nn.functional as F
 from diffusers import FlowMatchEulerDiscreteScheduler
 from tqdm import tqdm
 import numpy as np
+import accelerate
+
+
+from transformers import AutoImageProcessor, AutoModel
+from PIL import Image
+from torchvision import transforms
+
+
 
 from utils.metrics import *
 
@@ -108,11 +118,228 @@ def calc_v_flux(pipe, latents, prompt_embeds, pooled_prompt_embeds, guidance, te
 
     return noise_pred
 
+
+
+class DifferentiableMetrics:  # 输入图像值范围均为[-1,1]
+    def __init__(self):
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        
+        # 加载CLIP模型
+        try:
+            import clip
+            self.clip = clip  # 保存为类属性
+            self.clip_model, self.clip_preprocess = clip.load("ViT-B/32", device=self.device)
+            # self.clip_model.eval()
+        except ImportError:
+            print("请安装OpenAI CLIP库: pip install git+https://github.com/openai/CLIP.git")
+            self.clip_model = None
+        
+        # 加载DINOv2模型和处理器
+        model_folder = '/data/chx/dinov2-base'
+        self.dino_processor = AutoImageProcessor.from_pretrained(model_folder)
+        self.dino_model = AutoModel.from_pretrained(model_folder).to(self.device)
+        self.dino_model.eval()
+
+        # 加载LPIPS VGG模型
+        self.lpips_vgg = self._load_lpips_vgg().to(self.device)
+    
+    def _load_lpips_vgg(self):
+        """加载预训练的VGG模型用于LPIPS计算"""
+        try:
+            import torchvision.models as models
+            vgg = models.vgg16(pretrained=True).features
+            vgg_layers = [0, 4, 9, 16, 23, 30]
+            model = nn.ModuleList()
+            for i in range(len(vgg_layers)-1):
+                model.append(vgg[vgg_layers[i]:vgg_layers[i+1]])
+            return nn.Sequential(*model)
+        except:
+            print("无法加载VGG模型,LPIPS度量可能不可用")
+            return nn.Sequential()  # 返回空模型
+
+    def _tensor_to_pil(self, tensor):
+        """将[-1,1]范围的Tensor转换为PIL图像"""
+        # 处理可能的批量维度（当输入是4维时）
+        if tensor.dim() == 4:
+            tensor = tensor.squeeze(0)  # 从[B C H W] -> [C H W]
+        
+        # 转换为[0,1]范围
+        image_01 = (tensor + 1) / 2
+        # 调整维度顺序并转换为uint8
+        image_uint8 = (image_01.permute(1, 2, 0) * 255).clamp(0, 255).cpu().numpy().astype(np.uint8)
+        # 转换为PIL图像
+        return Image.fromarray(image_uint8)
+
+    def _normalize_to_0_1(self, tensor):
+        """将[-1,1]归一化到[0,1]"""
+        return (tensor + 1) / 2
+    
+    def mse_scores(self, image1, image2):
+        """可微分MSE评分"""
+        # 确保输入为连续内存
+        image1 = image1.contiguous()
+        image2 = image2.contiguous()
+        
+        # 直接计算均方误差
+        mse = F.mse_loss(image1, image2)
+        return mse
+    
+    def psnr_scores(self, image1, image2):
+        """可微分PSNR评分,图像范围[-1,1],data_range=2.0"""
+        # 计算MSE
+        mse = self.mse_scores(image1, image2)
+        # 计算PSNR（峰值信噪比）
+        data_range = 2.0  # 因为输入在[-1,1]范围
+        psnr = 10 * torch.log10(data_range**2 / mse)
+        return psnr
+    
+    def ssim_scores(self, image1, image2):
+        """可微分SSIM评分,图像范围[-1,1]"""
+        # 转换到[0,1]范围
+        img1 = self._normalize_to_0_1(image1)
+        img2 = self._normalize_to_0_1(image2)
+        
+        # SSIM参数
+        C1 = (0.01 * 1) ** 2
+        C2 = (0.03 * 1) ** 2
+        kernel_size = 11
+        sigma = 1.5
+        
+        # 创建高斯核
+        coords = torch.arange(kernel_size, device=img1.device).float() - kernel_size // 2
+        x = coords.repeat(kernel_size, 1)
+        y = x.t()
+        gaussian_kernel = torch.exp(-(x**2 + y**2) / (2 * sigma**2))
+        gaussian_kernel = gaussian_kernel / gaussian_kernel.sum()
+        gaussian_kernel = gaussian_kernel.view(1, 1, kernel_size, kernel_size).repeat(img1.size(1), 1, 1, 1)
+        
+        # 应用卷积获取均值和方差
+        padding = kernel_size // 2
+        mu1 = F.conv2d(img1, gaussian_kernel, padding=padding, groups=img1.size(1))
+        mu2 = F.conv2d(img2, gaussian_kernel, padding=padding, groups=img2.size(1))
+        
+        mu1_sq = mu1.pow(2)
+        mu2_sq = mu2.pow(2)
+        mu1_mu2 = mu1 * mu2
+        
+        sigma1_sq = F.conv2d(img1 * img1, gaussian_kernel, padding=padding, groups=img1.size(1)) - mu1_sq
+        sigma2_sq = F.conv2d(img2 * img2, gaussian_kernel, padding=padding, groups=img2.size(1)) - mu2_sq
+        sigma12 = F.conv2d(img1 * img2, gaussian_kernel, padding=padding, groups=img1.size(1)) - mu1_mu2
+        
+        # 计算SSIM
+        ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
+        return ssim_map.mean()
+    
+    def lpips_scores(self, image1, image2):
+        """可微分LPIPS评分"""
+        # 转换输入范围从[-1,1]到[0,1]
+        img1 = self._normalize_to_0_1(image1)
+        img2 = self._normalize_to_0_1(image2)
+        
+        # 需要重新调整大小到224x224以匹配VGG输入
+        if img1.size(-1) != 224 or img1.size(-2) != 224:
+            img1 = F.interpolate(img1, size=(224, 224), mode='bilinear', align_corners=False)
+        if img2.size(-1) != 224 or img2.size(-2) != 224:
+            img2 = F.interpolate(img2, size=(224, 224), mode='bilinear', align_corners=False)
+            
+        # 从[0,1]转到ImageNet归一化
+        mean = torch.tensor([0.485, 0.456, 0.406], device=img1.device).view(1, 3, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225], device=img1.device).view(1, 3, 1, 1)
+        img1 = (img1 - mean) / std
+        img2 = (img2 - mean) / std
+        
+        # 计算每层特征的距离
+        
+        dist = 0
+        for layer in self.lpips_vgg:
+            img1 = layer(img1)
+            img2 = layer(img2)
+            dist += F.l1_loss(img1, img2)
+        
+        return dist
+
+    def dino_scores(self, image1, image2):
+        """计算两幅图像之间的DINO特征相似度"""
+        # 转换Tensor到PIL图像
+        image1_pil = self._tensor_to_pil(image1)
+        image2_pil = self._tensor_to_pil(image2)
+        
+        # 处理图像并提取特征
+
+        inputs1 = self.dino_processor(images=image1_pil, return_tensors="pt").to(self.device)
+        inputs2 = self.dino_processor(images=image2_pil, return_tensors="pt").to(self.device)
+        
+        outputs1 = self.dino_model(**inputs1)
+        outputs2 = self.dino_model(**inputs2)
+    
+        # 提取并平均特征
+        features1 = outputs1.last_hidden_state.mean(dim=1)
+        features2 = outputs2.last_hidden_state.mean(dim=1)
+        
+        # 计算余弦相似度并归一化
+        sim = F.cosine_similarity(features1, features2, dim=1)
+        return (sim + 1) / 2  # 归一化到[0,1]
+    
+    
+    def clip_transform(self, image):
+        """
+        将[-1,1]范围的张量直接转换为CLIP期望的归一化格式
+        输入: 张量范围[-1,1], 形状可以是 (C,H,W) 或 (B,C,H,W)
+        输出: 归一化后的张量
+        """
+        # 确保输入为[-1,1]范围
+        image = torch.clamp(image, -1.0, 1.0)
+        
+        # 转换到[0,1]范围
+        image_01 = (image + 1) / 2.0
+        
+        # 调整尺寸到224x224（CLIP-ViT的标准输入）
+        if image.dim() == 4:  # 批处理模式 [B,C,H,W]
+            image_resized = F.interpolate(image_01, size=(224,224), mode='bicubic')
+        else:  # 单图像模式 [C,H,W]
+            image_resized = F.interpolate(image_01.unsqueeze(0), size=(224,224), mode='bicubic').squeeze(0)
+        
+        # CLIP标准化参数
+        mean = torch.tensor([0.48145466, 0.4578275, 0.40821073], 
+                        device=image.device).view(-1, 1, 1)
+        std = torch.tensor([0.26862954, 0.26130258, 0.27577711], 
+                        device=image.device).view(-1, 1, 1)
+        
+        # 应用标准化
+        return (image_resized - mean) / std
+
+    def clip_scores(self, image, txt):
+        """使用CLIP模型计算图像和文本/图像的相似度"""
+        if self.clip_model is None:
+            return torch.tensor(0.0)
+            
+        # 将图像从[-1,1]转换到CLIP期望的格式
+        image_clip_transform = self.clip_transform(image)
+        
+
+        if isinstance(txt, torch.Tensor):  # 图像-图像相似度
+            text_pil = self._tensor_to_pil(txt)
+            image_features = self.clip_model.encode_image(image_clip_transform.to(self.device))
+            text_features = self.clip_model.encode_image(self.clip_preprocess(text_pil).unsqueeze(0).to(self.device))
+        else:  # 图像-文本相似度
+            image_features = self.clip_model.encode_image(image_clip_transform.to(self.device))
+            text_features = self.clip_model.encode_text(self.clip.tokenize(txt).to(self.device))
+            
+        # 归一化特征
+        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+        
+        # 计算相似度分数
+        similarity = (100.0 * image_features @ text_features.T).softmax(dim=-1)
+            
+        return similarity[0][0]#.cpu()
+
+
 class MetricGuidance:
     def __init__(self, pipe, device):
         self.pipe = pipe
         self.device = device
-        self.metric_calculator = metircs()  # 指标计算器
+        self.metric_calculator = DifferentiableMetrics()  # 指标计算器
         
     def compute_guidance_grad(self, z_fe, src_img, tar_prompt,orig_height, orig_width):
         """
@@ -135,16 +362,31 @@ class MetricGuidance:
             
             # 解码回像素空间
             x0_tar_denorm = (unpacked_out / self.pipe.vae.config.scaling_factor) + self.pipe.vae.config.shift_factor
-            with torch.autocast("cuda"), torch.inference_mode():
-                image_tar = self.pipe.vae.decode(x0_tar_denorm, return_dict=False)[0]
-            edited_img = self.pipe.image_processor.postprocess(image_tar)[0]
-            
+            # with torch.autocast("cuda"):
+            # self.pipe.vae.to("cpu")
+            # print("VAE device:", self.pipe.vae.device)  # 如果 vae 本身有 device 属性
+            # # 或者更详细地检查 encoder/decoder 的设备
+            # print("VAE encoder device:", next(self.pipe.vae.encoder.parameters()).device)
+            # print("VAE decoder device:", next(self.pipe.vae.decoder.parameters()).device)
+            x0_tar_denorm = x0_tar_denorm.to("cpu")
+            accelerate.hooks.remove_hook_from_module(self.pipe.vae)
+            image_tar = self.pipe.vae.decode(x0_tar_denorm, return_dict=False)[0]
+            image_tar = torch.clamp(image_tar, -1.0, 1.0) 
+            edited_img = image_tar
+            # edited_img = self.pipe.image_processor.postprocess(image_tar)[0]
+
+            edited_img= edited_img.to(self.device)
+            self.pipe.enable_model_cpu_offload()
+            print(f"范围: [{edited_img.min().item():.3f}, {edited_img.max().item():.3f}]")
+
             # 转换图像为评估用的张量
             edited_tensor = transforms.Compose([
-                transforms.Resize((orig_height, orig_width)),
-                transforms.ToTensor(),
-                transforms.Normalize([0.5], [0.5])
-            ])(edited_img).unsqueeze(0).to(self.device)
+                # transforms.Resize((orig_height, orig_width)),
+                # transforms.ToTensor(),
+                transforms.Normalize([0], [1])
+            ])(edited_img).to(self.device)
+
+            print(f"范围: [{edited_tensor.min().item():.3f}, {edited_tensor.max().item():.3f}]")
             
             orig_tensor = transforms.Compose([
                 transforms.Resize((orig_height, orig_width)),
@@ -152,16 +394,18 @@ class MetricGuidance:
                 transforms.Normalize([0.5], [0.5])
             ])(src_img).unsqueeze(0).to(self.device)
 
-
+            # edited_tensor = edited_tensor.squeeze()
+            # orig_tensor = orig_tensor.squeeze()
+            edited_tensor=edited_tensor.float()
             # 计算所有指标
             metrics = {
                 'clip': self.metric_calculator.clip_scores(edited_tensor, tar_prompt),
                 'clip_i': self.metric_calculator.clip_scores(edited_tensor, orig_tensor),
-                'mse': self.metric_calculator.mse_scores(edited_tensor, orig_tensor),
-                'psnr': self.metric_calculator.psnr_scores(edited_tensor, orig_tensor),
-                'lpips': self.metric_calculator.lpips_scores(edited_tensor, orig_tensor),
-                'ssim': self.metric_calculator.ssim_scores(edited_tensor, orig_tensor),
-                'dino': self.metric_calculator.dino_scores(edited_tensor, orig_tensor)
+                # 'mse': self.metric_calculator.mse_scores(edited_tensor, orig_tensor),
+                # 'psnr': self.metric_calculator.psnr_scores(edited_tensor, orig_tensor),
+                # 'lpips': self.metric_calculator.lpips_scores(edited_tensor, orig_tensor),
+                # 'ssim': self.metric_calculator.ssim_scores(edited_tensor, orig_tensor),
+                # 'dino': self.metric_calculator.dino_scores(edited_tensor, orig_tensor)
             }
 
             del self.metric_calculator
@@ -169,11 +413,11 @@ class MetricGuidance:
             # 构建多目标损失函数 (可配置权重)
             loss = (
                 1.0 * (1 - metrics['clip']) +    # 最大化文本对齐
-                0.8 * metrics['clip_i'] +         # 保持图像相似性
-                0.5 * metrics['lpips'] +         # 最小化感知差异
-                0.3 * metrics['mse'] +           # 降低像素误差
-                0.2 * (1 - metrics['ssim']) +    # 提高结构相似性
-                0.1 * (1 - metrics['dino'])      # 增强高级特征匹配
+                0.8 * (1-metrics['clip_i'])          # 保持图像相似性
+                # 0.5 * metrics['lpips'] +         # 最小化感知差异
+                # 0.3 * metrics['mse'] +           # 降低像素误差
+                # 0.2 * (1 - metrics['ssim']) +    # 提高结构相似性
+                # 0.1 * (1 - metrics['dino'])      # 增强高级特征匹配
             )
             
             # 反向传播计算梯度
@@ -481,7 +725,7 @@ def FlowEditFLUX(pipe,
                 if i % guide_freq == 0:  # 每3步应用一次指标引导
                     metric_guide = MetricGuidance(pipe, device='cuda')
                     guide_grad, _ = metric_guide.compute_guidance_grad(
-                        zt_edit, init_image_pil, src_prompt, tar_prompt,orig_height, orig_width
+                        zt_edit, init_image_pil, tar_prompt,orig_height, orig_width
                         )
                     
                     # 混合流编辑和指标梯度 (可配置混合权重)
