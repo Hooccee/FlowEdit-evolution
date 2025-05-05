@@ -4,4 +4,5 @@
 outputs/**/*.png
 **/__pycache__/
 **result**
-test.ipynb
+**.ipynb
+**.png

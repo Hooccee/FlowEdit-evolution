@@ -368,16 +368,19 @@ class MetricGuidance:
             # # 或者更详细地检查 encoder/decoder 的设备
             # print("VAE encoder device:", next(self.pipe.vae.encoder.parameters()).device)
             # print("VAE decoder device:", next(self.pipe.vae.decoder.parameters()).device)
-            x0_tar_denorm = x0_tar_denorm.to("cpu")
-            accelerate.hooks.remove_hook_from_module(self.pipe.vae)
+
+            # x0_tar_denorm = x0_tar_denorm.to("cpu")
+            # accelerate.hooks.remove_hook_from_module(self.pipe.vae)
+
+
             image_tar = self.pipe.vae.decode(x0_tar_denorm, return_dict=False)[0]
             image_tar = torch.clamp(image_tar, -1.0, 1.0) 
             edited_img = image_tar
             # edited_img = self.pipe.image_processor.postprocess(image_tar)[0]
 
             edited_img= edited_img.to(self.device)
-            self.pipe.enable_model_cpu_offload()
-            print(f"范围: [{edited_img.min().item():.3f}, {edited_img.max().item():.3f}]")
+            # self.pipe.enable_model_cpu_offload()
+            # print(f"范围: [{edited_img.min().item():.3f}, {edited_img.max().item():.3f}]")
 
             # 转换图像为评估用的张量
             edited_tensor = transforms.Compose([
@@ -409,6 +412,7 @@ class MetricGuidance:
             }
 
             del self.metric_calculator
+            torch.cuda.empty_cache()
 
             # 构建多目标损失函数 (可配置权重)
             loss = (
@@ -621,8 +625,8 @@ def FlowEditFLUX(pipe,
     num_warmup_steps = max(len(timesteps) - T_steps * pipe.scheduler.order, 0)
     pipe._num_timesteps = len(timesteps)
 
-    pipe.text_encoder.to('cuda')
-    pipe.text_encoder_2.to('cuda')
+    # pipe.text_encoder.to('cuda')
+    # pipe.text_encoder_2.to('cuda')
     # 编码源提示文本
     (
         src_prompt_embeds,        # 源提示的嵌入表示
@@ -631,7 +635,7 @@ def FlowEditFLUX(pipe,
     ) = pipe.encode_prompt(
         prompt=src_prompt,
         prompt_2=None,            #默认与prompt一致
-        device=device,
+        # device=device,
     )
 
     # 编码目标提示文本
@@ -643,7 +647,7 @@ def FlowEditFLUX(pipe,
     ) = pipe.encode_prompt(
         prompt=tar_prompt,
         prompt_2=None,            #默认与prompt一致
-        device=device,
+        # device=device,
     )
 
     # 处理引导参数
@@ -658,9 +662,9 @@ def FlowEditFLUX(pipe,
     zt_edit = x_src_packed.clone()  # 初始化为源潜在变量
 
 
-    pipe.vae.to('cpu')
-    pipe.text_encoder.to('cpu')
-    pipe.text_encoder_2.to('cpu')
+    # pipe.vae.to('cpu')
+    # pipe.text_encoder.to('cpu')
+    # pipe.text_encoder_2.to('cpu')
     torch.cuda.empty_cache() 
 
 
@@ -732,6 +736,8 @@ def FlowEditFLUX(pipe,
                     V_delta_avg += 0.2 * guide_grad / (guide_grad.norm() + 1e-6)
                     
                     del metric_guide
+                    del guide_grad
+                    torch.cuda.empty_cache()
 
             # 更新ODE状态（使用欧拉方法）
             zt_edit = zt_edit.to(torch.float32) + (t_im1 - t_i) * V_delta_avg

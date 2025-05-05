@@ -1,5 +1,5 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = '1'
+# os.environ["CUDA_VISIBLE_DEVICES"] = '1'
 import gc
 import torch
 from diffusers import StableDiffusion3Pipeline, FluxPipeline,FluxTransformer2DModel
@@ -87,7 +87,8 @@ def main():
     args = parser.parse_args()
 
     # 2. 设备设置 ##################################################
-    device = torch.device(f"cuda:{args.device_number}" if torch.cuda.is_available() else "cpu")
+    # device = torch.device(f"cuda:{args.device_number}" if torch.cuda.is_available() else "cpu")
+    device = torch.device(f"cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
     # 3. 数据加载 ##################################################
@@ -112,19 +113,25 @@ def main():
 
     # 4. 模型加载 ##################################################
     if args.model_type == 'FLUX':
-        # pipe = FluxPipeline.from_pretrained(args.model_path, torch_dtype=torch.float16)
-        # pipe.enable_sequential_cpu_offload()
+        pipe = FluxPipeline.from_pretrained(args.model_path, torch_dtype=torch.bfloat16)
+        pipe.enable_sequential_cpu_offload()
 
-        quant_config = DiffusersBitsAndBytesConfig(load_in_8bit=True,)
-        transformer_8bit = FluxTransformer2DModel.from_pretrained(
-            args.model_path,
-            subfolder="transformer",
-            quantization_config=quant_config,
-            torch_dtype=torch.bfloat16,
-        )
-        pipe = FluxPipeline.from_pretrained(args.model_path, torch_dtype=torch.bfloat16,transformer=transformer_8bit)
-        print(pipe.hf_device_map)
-        pipe.enable_model_cpu_offload()
+        # quant_config = DiffusersBitsAndBytesConfig(load_in_8bit=True,)
+        # transformer_8bit = FluxTransformer2DModel.from_pretrained(
+        #     args.model_path,
+        #     subfolder="transformer",
+        #     quantization_config=quant_config,
+        #     torch_dtype=torch.bfloat16,
+        # )
+        # pipe = FluxPipeline.from_pretrained(args.model_path, torch_dtype=torch.bfloat16,transformer=transformer_8bit,
+        #                                     # device_map="balanced",
+        #                                     )
+        # print(pipe.hf_device_map)
+
+        # pipe.enable_model_cpu_offload()
+
+        pipe.vae.enable_slicing()
+        pipe.vae.enable_tiling()
 
 
 
@@ -249,7 +256,7 @@ def main():
                     del metric_calculator  # 清理指标计算器
                     gc.collect()
                     
-                    dino_val=dino_val.item()
+                    
                     # 打印样本指标
                     print(f"\n样本 {batch_idx}-{idx} 指标:")
                     print(f"源提示: {source_prompts[idx]}")
