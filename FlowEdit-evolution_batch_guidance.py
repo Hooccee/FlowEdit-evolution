@@ -1,5 +1,5 @@
 import os
-# os.environ["CUDA_VISIBLE_DEVICES"] = '1'
+os.environ["CUDA_VISIBLE_DEVICES"] = '3'
 import gc
 import torch
 from diffusers import StableDiffusion3Pipeline, FluxPipeline,FluxTransformer2DModel

@@ -258,18 +258,75 @@ class DifferentiableMetrics:  # 输入图像值范围均为[-1,1]
         
         return dist
 
+
+    def dino_transform(self,image: torch.Tensor) -> torch.Tensor:
+        """
+        可微分图像预处理流程（适配dino模型，输入范围[-1,1]）
+        输入: 张量范围[-1,1], 支持形状 (C,H,W) 或 (B,C,H,W)
+        输出: 标准化后的张量，形状 (C,224,224) 或 (B,C,224,224)
+        """
+        # 确保输入在[-1,1]范围内（可导操作）
+        image = torch.tanh(image) * 0.9999  # 软截断，避免梯度爆炸
+        
+        # 统一处理批次维度
+        is_batched = image.ndim == 4
+        if not is_batched:
+            image = image.unsqueeze(0)  # [B,C,H,W]
+
+        # Step 1: 调整大小（短边缩放到256，保持宽高比）
+        B, C, H, W = image.shape
+        shortest_edge = min(H, W)
+        scale = 256.0 / shortest_edge
+        new_H = int(round(H * scale))
+        new_W = int(round(W * scale))
+        
+        # 双三次插值调整大小
+        resized = F.interpolate(
+            image, 
+            size=(new_H, new_W), 
+            mode='bicubic', 
+            align_corners=False
+        )
+
+        # Step 2: 中心裁剪224x224
+        _, _, H_resized, W_resized = resized.shape
+        start_y = (H_resized - 224) // 2
+        start_x = (W_resized - 224) // 2
+        cropped = resized[..., start_y:start_y+224, start_x:start_x+224]
+
+        # Step 3: 缩放 + 归一化（数学等价原流程）
+        scaled = cropped * 0.5  # 将[-1,1]映射到[-0.5,0.5]
+        
+        # BiT标准化参数（原均值减去0.5）
+        mean = torch.tensor([-0.015, -0.044, -0.094], 
+                        dtype=scaled.dtype, 
+                        device=scaled.device).view(1, 3, 1, 1)
+        
+        std = torch.tensor([0.229, 0.224, 0.225], 
+                        dtype=scaled.dtype, 
+                        device=scaled.device).view(1, 3, 1, 1)
+        
+        normalized = (scaled - mean) / std
+
+        # 恢复原始形状
+        if not is_batched:
+            normalized = normalized.squeeze(0)
+
+        return normalized
+
     def dino_scores(self, image1, image2):
         """计算两幅图像之间的DINO特征相似度"""
         # 转换Tensor到PIL图像
-        image1_pil = self._tensor_to_pil(image1)
+        # image1_pil = self._tensor_to_pil(image1)
         image2_pil = self._tensor_to_pil(image2)
         
         # 处理图像并提取特征
 
-        inputs1 = self.dino_processor(images=image1_pil, return_tensors="pt").to(self.device)
+        # inputs1 = self.dino_processor(images=image1_pil, return_tensors="pt").to(self.device)
+        inputs1 = self.dino_transform(image1)
         inputs2 = self.dino_processor(images=image2_pil, return_tensors="pt").to(self.device)
         
-        outputs1 = self.dino_model(**inputs1)
+        outputs1 = self.dino_model(inputs1)
         outputs2 = self.dino_model(**inputs2)
     
         # 提取并平均特征
@@ -287,8 +344,8 @@ class DifferentiableMetrics:  # 输入图像值范围均为[-1,1]
         输入: 张量范围[-1,1], 形状可以是 (C,H,W) 或 (B,C,H,W)
         输出: 归一化后的张量
         """
-        # 确保输入为[-1,1]范围
-        image = torch.clamp(image, -1.0, 1.0)
+        # 确保输入在[-1,1]范围内（可导操作）
+        image = torch.tanh(image) * 0.9999  # 软截断，避免梯度爆炸
         
         # 转换到[0,1]范围
         image_01 = (image + 1) / 2.0
@@ -330,9 +387,9 @@ class DifferentiableMetrics:  # 输入图像值范围均为[-1,1]
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
         
         # 计算相似度分数
-        similarity = (100.0 * image_features @ text_features.T).softmax(dim=-1)
+        similarity = (image_features @ text_features.T).squeeze()
             
-        return similarity[0][0]#.cpu()
+        return similarity.mean()#.item()
 
 
 class MetricGuidance:
@@ -389,7 +446,7 @@ class MetricGuidance:
                 transforms.Normalize([0], [1])
             ])(edited_img).to(self.device)
 
-            print(f"范围: [{edited_tensor.min().item():.3f}, {edited_tensor.max().item():.3f}]")
+            # print(f"范围: [{edited_tensor.min().item():.3f}, {edited_tensor.max().item():.3f}]")
             
             orig_tensor = transforms.Compose([
                 transforms.Resize((orig_height, orig_width)),
@@ -404,11 +461,11 @@ class MetricGuidance:
             metrics = {
                 'clip': self.metric_calculator.clip_scores(edited_tensor, tar_prompt),
                 'clip_i': self.metric_calculator.clip_scores(edited_tensor, orig_tensor),
-                # 'mse': self.metric_calculator.mse_scores(edited_tensor, orig_tensor),
-                # 'psnr': self.metric_calculator.psnr_scores(edited_tensor, orig_tensor),
-                # 'lpips': self.metric_calculator.lpips_scores(edited_tensor, orig_tensor),
-                # 'ssim': self.metric_calculator.ssim_scores(edited_tensor, orig_tensor),
-                # 'dino': self.metric_calculator.dino_scores(edited_tensor, orig_tensor)
+                'mse': self.metric_calculator.mse_scores(edited_tensor, orig_tensor),
+                'psnr': self.metric_calculator.psnr_scores(edited_tensor, orig_tensor),
+                'lpips': self.metric_calculator.lpips_scores(edited_tensor, orig_tensor),
+                'ssim': self.metric_calculator.ssim_scores(edited_tensor, orig_tensor),
+                'dino': self.metric_calculator.dino_scores(edited_tensor, orig_tensor)
             }
 
             del self.metric_calculator
@@ -418,14 +475,46 @@ class MetricGuidance:
             loss = (
                 1.0 * (1 - metrics['clip']) +    # 最大化文本对齐
                 0.8 * (1-metrics['clip_i'])          # 保持图像相似性
-                # 0.5 * metrics['lpips'] +         # 最小化感知差异
+                # 0.5 * metrics['lpips']          # 最小化感知差异
                 # 0.3 * metrics['mse'] +           # 降低像素误差
-                # 0.2 * (1 - metrics['ssim']) +    # 提高结构相似性
+                # 1.0 * metrics['psnr']           # 提高峰值信噪比
+                # 0.2 * (1 - metrics['ssim'])     # 提高结构相似性
                 # 0.1 * (1 - metrics['dino'])      # 增强高级特征匹配
             )
             
             # 反向传播计算梯度
             loss.backward()
+
+            print("clip:", metrics['clip'].item())
+            print("clip_i:", metrics['clip_i'].item())
+            print("mse:", metrics['mse'].item())
+            print("psnr:", metrics['psnr'].item())
+            print("lpips:", metrics['lpips'].item())
+            print("ssim:", metrics['ssim'].item())
+            print("dino:", metrics['dino'].item())
+            # 在 loss.backward() 后添加梯度打印逻辑
+            if z_fe.grad is not None:
+                # 打印梯度基本信息
+                print("\n梯度详细信息:")
+                print(f"梯度形状: {z_fe.grad.shape}")
+                print(f"梯度数据类型: {z_fe.grad.dtype}")
+                print(f"梯度设备位置: {z_fe.grad.device}")
+                
+                # 打印统计信息
+                print(f"绝对值均值: {z_fe.grad.abs().mean().item():.6f}")
+                print(f"标准差: {z_fe.grad.std().item():.6f}")
+                print(f"最大值: {z_fe.grad.max().item():.6f}")
+                print(f"最小值: {z_fe.grad.min().item():.6f}")
+                print(f"L2范数: {z_fe.grad.norm().item():.6f}")  # 整体梯度大小
+                
+                # 检查异常值
+                print(f"NaN数量: {torch.isnan(z_fe.grad).sum().item()}")
+                print(f"Inf数量: {torch.isinf(z_fe.grad).sum().item()}")
+                
+                # 可选：打印前10个元素的梯度值
+                # print("前10个梯度值:", z_fe.grad.flatten()[:10].cpu().numpy())
+            else:
+                print("警告：梯度为None，未成功计算梯度！")
             return z_fe.grad.data.clone(), metrics
 
 @torch.no_grad()
@@ -725,7 +814,7 @@ def FlowEditFLUX(pipe,
                 V_delta_avg += (1 / n_avg) * (Vt_tar - Vt_src)
 
                 # 添加指标引导
-                guide_freq = 3  # 指标引导频率
+                guide_freq = 2  # 指标引导频率
                 if i % guide_freq == 0:  # 每3步应用一次指标引导
                     metric_guide = MetricGuidance(pipe, device='cuda')
                     guide_grad, _ = metric_guide.compute_guidance_grad(
