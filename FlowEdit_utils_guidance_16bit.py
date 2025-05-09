@@ -515,7 +515,10 @@ class MetricGuidance:
                 # print("前10个梯度值:", z_fe.grad.flatten()[:10].cpu().numpy())
             else:
                 print("警告：梯度为None，未成功计算梯度！")
-            return z_fe.grad.data.clone(), metrics
+                
+            del metrics,loss, edited_img, edited_tensor, orig_tensor
+            torch.cuda.empty_cache()
+            return z_fe.grad.data.clone()#, metrics
 
 @torch.no_grad()
 def FlowEditSD3(pipe,
@@ -754,7 +757,7 @@ def FlowEditFLUX(pipe,
     # pipe.vae.to('cpu')
     # pipe.text_encoder.to('cpu')
     # pipe.text_encoder_2.to('cpu')
-    torch.cuda.empty_cache() 
+    # torch.cuda.empty_cache() 
 
 
     # 主循环：迭代处理每个时间步
@@ -817,7 +820,7 @@ def FlowEditFLUX(pipe,
                 guide_freq = 2  # 指标引导频率
                 if i % guide_freq == 0:  # 每3步应用一次指标引导
                     metric_guide = MetricGuidance(pipe, device='cuda')
-                    guide_grad, _ = metric_guide.compute_guidance_grad(
+                    guide_grad = metric_guide.compute_guidance_grad(
                         zt_edit, init_image_pil, tar_prompt,orig_height, orig_width
                         )
                     

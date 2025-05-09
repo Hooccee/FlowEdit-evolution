@@ -1,8 +1,8 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = '3'
+os.environ["CUDA_VISIBLE_DEVICES"] = '0'
 import gc
 import torch
-from diffusers import StableDiffusion3Pipeline, FluxPipeline,FluxTransformer2DModel
+from diffusers import StableDiffusion3Pipeline, FluxPipeline,FluxTransformer2DModel ,AutoModel, TorchAoConfig
 from diffusers import BitsAndBytesConfig as DiffusersBitsAndBytesConfig
 from PIL import Image
 import argparse
@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 # from FlowEdit_utils import FlowEditSD3, FlowEditFLUX
-from FlowEdit_utils_guidance import FlowEditSD3, FlowEditFLUX
+from FlowEdit_utils_guidance_8bit import FlowEditSD3, FlowEditFLUX
 from datasets import get_dataloader
 from utils.utils import *
 from utils.metrics import *
@@ -113,8 +113,8 @@ def main():
 
     # 4. 模型加载 ##################################################
     if args.model_type == 'FLUX':
-        pipe = FluxPipeline.from_pretrained(args.model_path, torch_dtype=torch.bfloat16)
-        pipe.enable_sequential_cpu_offload()
+        # pipe = FluxPipeline.from_pretrained(args.model_path, torch_dtype=torch.bfloat16)
+        # pipe.enable_sequential_cpu_offload()
 
         # quant_config = DiffusersBitsAndBytesConfig(load_in_8bit=True,)
         # transformer_8bit = FluxTransformer2DModel.from_pretrained(
@@ -123,15 +123,36 @@ def main():
         #     quantization_config=quant_config,
         #     torch_dtype=torch.bfloat16,
         # )
+        from diffusers import FluxPipeline, AutoModel, TorchAoConfig
+        model_id = "/data/chx/FLUX.1-dev"
+        dtype = torch.bfloat16
+
+        quantization_config = TorchAoConfig("int8wo")
+        transformer = AutoModel.from_pretrained(
+            model_id,
+            subfolder="transformer",
+            quantization_config=quantization_config,
+            torch_dtype=dtype,
+        )
+
+        pipe = FluxPipeline.from_pretrained(
+            model_id,
+            transformer=transformer,
+            torch_dtype=dtype,
+        )
+        # pipe.transformer = torch.compile(pipe.transformer, mode="max-autotune", fullgraph=True)
+
+
         # pipe = FluxPipeline.from_pretrained(args.model_path, torch_dtype=torch.bfloat16,transformer=transformer_8bit,
         #                                     # device_map="balanced",
         #                                     )
-        # print(pipe.hf_device_map)
+        print(pipe.hf_device_map)
 
-        # pipe.enable_model_cpu_offload()
+        pipe.enable_model_cpu_offload()
+        pipe.transformer.to(device)
 
-        pipe.vae.enable_slicing()
-        pipe.vae.enable_tiling()
+        # pipe.vae.enable_slicing()
+        # pipe.vae.enable_tiling()
 
 
 
@@ -194,8 +215,10 @@ def main():
                 image_src = image_src.to(device).to(torch.bfloat16)
                 
                 # 编码到潜在空间
-                with torch.autocast("cuda"), torch.inference_mode():
-                    x0_src_denorm = pipe.vae.encode(image_src).latent_dist.mode()
+                # with torch.autocast("cuda"), torch.inference_mode():
+                #     x0_src_denorm = pipe.vae.encode(image_src).latent_dist.mode()
+                x0_src_denorm = pipe.vae.encode(image_src).latent_dist.mode()
+
                 x0_src = (x0_src_denorm - pipe.vae.config.shift_factor) * pipe.vae.config.scaling_factor
                 x0_src = x0_src.to(device).to(torch.bfloat16)
                 
@@ -224,9 +247,14 @@ def main():
                 
                 # 解码回像素空间
                 x0_tar_denorm = (x0_tar / pipe.vae.config.scaling_factor) + pipe.vae.config.shift_factor
-                with torch.autocast("cuda"), torch.inference_mode():
-                    image_tar = pipe.vae.decode(x0_tar_denorm, return_dict=False)[0]
-                edited_img = pipe.image_processor.postprocess(image_tar)[0]
+                # with torch.inference_mode():
+                #     image_tar = pipe.vae.decode(x0_tar_denorm, return_dict=False)[0]
+                image_tar = pipe.vae.decode(x0_tar_denorm, return_dict=False)[0]
+                edited_img = pipe.image_processor.postprocess(image_tar.detach().cpu().to(torch.float32))[0]
+
+                # 立即清理不再需要的中间变量
+                del image_src, x0_src_denorm, x0_src, x0_tar, x0_tar_denorm, image_tar
+                torch.cuda.empty_cache()
                 
                 # 6.3 计算评估指标 ----------------------------
                 if args.eval_metrics:
@@ -253,7 +281,9 @@ def main():
                     ssim_val = metric_calculator.ssim_scores(edited_tensor, orig_tensor)
                     dino_val = metric_calculator.dino_scores(edited_tensor, orig_tensor)
 
-                    del metric_calculator  # 清理指标计算器
+                    # 清理指标计算器和中间张量
+                    del metric_calculator, edited_tensor, orig_tensor
+                    torch.cuda.empty_cache()
                     gc.collect()
                     
                     
@@ -336,6 +366,7 @@ def main():
         
         # 清理显存
         torch.cuda.empty_cache()
+        gc.collect()
     
     # 7. 最终评估结果 #############################################
     if args.eval_metrics and metrics['count'] > 0:
